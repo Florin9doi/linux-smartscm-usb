@@ -1,0 +1,5 @@
+## SmartSCM-USB driver for PS2 modems
+- I-O Data P2GATE DFML-560/P2
+- ASCII ASC-1605M56
+- Aiwa PV-PS200
+- Melco IGM-UB56PS2C
