@@ -3,3 +3,11 @@
 - ASCII ASC-1605M56
 - Aiwa PV-PS200
 - Melco IGM-UB56PS2C
+
+## Usage
+```bash
+make
+sudo modprobe usbserial
+sudo rmmod smartscm_usb.ko
+sudo insmod smartscm_usb.ko
+```
