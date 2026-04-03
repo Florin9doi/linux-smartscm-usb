@@ -135,14 +135,9 @@ static void smartscm_read_bulk_callback(struct urb *urb)
         }
 
         if (len > 2) {
-            for (i = 2; i + 1 < len; i += 2) {
+            for (i = 2; i < len; i += 2) {
                 u8 data = buf[i];
-                u8 byte_status = buf[i + 1];
-
                 tty_insert_flip_char(&port->port, data, TTY_NORMAL);
-
-                if ((byte_status & 0x0F) != 0x01)
-                    break;
             }
 
             tty_flip_buffer_push(&port->port);
