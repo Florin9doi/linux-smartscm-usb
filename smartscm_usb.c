@@ -272,6 +272,7 @@ static void smartscm_close(struct usb_serial_port *port)
     if (!sp)
         return;
 
+    cancel_work_sync(&sp->dcd_work);
     usb_kill_urb(sp->read_urb);
     usb_kill_urb(sp->write_urb);
 
@@ -329,10 +330,15 @@ static void smartscm_port_remove(struct usb_serial_port *port)
     if (!sp)
         return;
 
+    cancel_work_sync(&sp->dcd_work);
+    usb_kill_urb(sp->read_urb);
+    usb_kill_urb(sp->write_urb);
+
     usb_free_urb(sp->read_urb);
     usb_free_urb(sp->write_urb);
     kfree(sp->read_buf);
     kfree(sp->write_buf);
+    usb_set_serial_port_data(port, NULL);
     kfree(sp);
 }
 
