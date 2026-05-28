@@ -112,7 +112,7 @@ static void smartscm_read_bulk_callback(struct urb *urb)
         return;
 
     if (status) {
-        dev_warn(&port->dev, "urb error: %d\n", status);
+        dev_warn(&port->dev, "RX urb error: %d\n", status);
         goto resubmit;
     }
 
@@ -219,6 +219,9 @@ static unsigned int smartscm_write_room(struct tty_struct *tty)
     struct smartscm_port *sp = usb_get_serial_port_data(port);
     unsigned long flags;
     unsigned int room;
+
+    if (!sp)
+        return 0;
 
     spin_lock_irqsave(&sp->lock, flags);
     room = sp->write_busy ? 0 : SMARTSCM_BUF_SIZE;
