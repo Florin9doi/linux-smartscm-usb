@@ -5,7 +5,7 @@
 - Aiwa PV-PS200
 - Melco IGM-UB56PS2C
 
-### Suntac modems (WIP)
+### PCTel Solsis modems (WIP)
 - Suntac OnlineStation MS56KPS2
 
 ## Usage

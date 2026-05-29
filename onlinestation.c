@@ -18,10 +18,20 @@
 #define ONLINESTATION_BUF_SIZE     4096
 #define ONLINESTATION_INT_BUF_SIZE 8
 
-#define ONLINESTATION_REQ_SET_BAUD       0x10
-#define ONLINESTATION_REQ_SET_LINE_STATE 0x11
-#define ONLINESTATION_REQ_SET_DATA_BITS  0x12
-#define ONLINESTATION_REQ_ENABLE         0xd0
+// ep0
+#define ONLINESTATION_SET_BAUD           0x10
+#define ONLINESTATION_SET_LINE_STATE     0x11
+#define   ONLINESTATION_EP0_DTR      (1 << 0)
+#define   ONLINESTATION_EP0_RTS      (1 << 1)
+#define ONLINESTATION_SET_DATA_BITS      0x12
+#define ONLINESTATION_REQ_STATUS         0xd0
+#define ONLINESTATION_SHUTDOWN           0xe0
+
+// ep3
+#define ONLINESTATION_IN1_CTS        (1 << 0)
+#define ONLINESTATION_IN1_DSR        (1 << 1)
+#define ONLINESTATION_IN1_RI         (1 << 2)
+#define ONLINESTATION_IN1_DCD        (1 << 3)
 
 static const u32 onlinestation_rates[] = {
     110, 300, 600, 1200, 2400, 4800, 9600,
@@ -44,16 +54,37 @@ struct onlinestation_port {
 
     u8 mcr;
     u8 msr;
+    u16 last_intr;
+
+    struct delayed_work init_work;
 };
+
+static int onlinestation_vendor_req(struct usb_serial_port *port,
+                                    u8 request)
+{
+    struct usb_device *udev = port->serial->dev;
+    u16 value;
+
+    usb_control_msg(udev,
+        usb_rcvctrlpipe(udev, 0),
+        request,
+        USB_TYPE_VENDOR | USB_RECIP_DEVICE | USB_DIR_IN,
+        0,
+        0,
+        (void*)&value,
+        sizeof(value),
+        1000);
+
+    dev_info(&port->dev,
+        "OS: vendor req req=0x%02x value=%04x\n",
+        request, value);
+    return value;
+}
 
 static int onlinestation_vendor_cmd(struct usb_serial_port *port,
                                     u8 request, u16 value)
 {
     struct usb_device *udev = port->serial->dev;
-
-    dev_info(&port->dev,
-        "OS: vendor cmd req=0x%02x wValue=0x%04x\n",
-        request, value);
 
     return usb_control_msg(udev,
         usb_sndctrlpipe(udev, 0),
@@ -64,6 +95,18 @@ static int onlinestation_vendor_cmd(struct usb_serial_port *port,
         NULL,
         0,
         1000);
+}
+
+static void onlinestation_init_work(struct work_struct *work)
+{
+    struct onlinestation_port *sp =
+        container_of(work, struct onlinestation_port, init_work.work);
+    struct usb_serial_port *port = sp->port;
+    int ret;
+
+    ret = onlinestation_vendor_req(port, ONLINESTATION_REQ_STATUS);
+    if (ret != 1)
+        schedule_delayed_work(&sp->init_work, msecs_to_jiffies(1));
 }
 
 static void onlinestation_read_bulk_callback(struct urb *urb)
@@ -118,8 +161,22 @@ static void onlinestation_int_callback(struct urb *urb)
         goto resubmit;
     }
 
-    if (urb->actual_length >= 2 && (sp->int_buf[0] != 0x04 || sp->int_buf[1] != 0x01))
-        dev_info(&port->dev, "OS: int_callback 0x%02x/0x%02x\n", sp->int_buf[0], sp->int_buf[1]);
+    if (urb->actual_length >= 2) {
+        u16 intr = (sp->int_buf[0] << 8) | sp->int_buf[1];
+
+        if (sp->last_intr != intr)
+            dev_info(&port->dev, "OS: int_callback 0x%02x/0x%02x : %s %s / %s %s %s %s\n",
+                sp->int_buf[0], sp->int_buf[1],
+                sp->int_buf[0] & 0x01 ? "out" : "   ",
+                sp->int_buf[0] & 0x04 ? "avl" : "   ",
+                sp->int_buf[1] & ONLINESTATION_IN1_DCD ? "DCD" : "   ",
+                sp->int_buf[1] & ONLINESTATION_IN1_RI  ? "RI " : "   ",
+                sp->int_buf[1] & ONLINESTATION_IN1_DSR ? "DSR" : "   ",
+                sp->int_buf[1] & ONLINESTATION_IN1_CTS ? "CTS" : "   "
+            );
+
+        sp->last_intr = intr;
+    }
 
     if (urb->actual_length >= 1 && (sp->int_buf[0] & 0x01)) {
 
@@ -254,11 +311,13 @@ static int onlinestation_open(struct tty_struct *tty,
     if (ret)
         dev_warn(&port->dev, "usb_set_interface failed: %d\n", ret);
 
-    onlinestation_vendor_cmd(port, ONLINESTATION_REQ_ENABLE, 0);
-    onlinestation_vendor_cmd(port, ONLINESTATION_REQ_SET_BAUD, onlinestation_baud_index(115200));
+    ret = onlinestation_vendor_req(port, ONLINESTATION_REQ_STATUS);
+    if (ret != 1)
+        schedule_delayed_work(&sp->init_work, msecs_to_jiffies(1));
+    onlinestation_vendor_cmd(port, ONLINESTATION_SET_BAUD, onlinestation_baud_index(115200));
 
-    sp->mcr = UART_MCR_RTS | UART_MCR_DTR;
-    onlinestation_vendor_cmd(port, ONLINESTATION_REQ_SET_LINE_STATE, sp->mcr);
+    sp->mcr = ONLINESTATION_EP0_RTS | ONLINESTATION_EP0_DTR;
+    onlinestation_vendor_cmd(port, ONLINESTATION_SET_LINE_STATE, sp->mcr);
 
     usb_fill_int_urb(sp->int_urb, udev,
         usb_rcvintpipe(udev, ONLINESTATION_EP_INT_IN),
@@ -280,12 +339,13 @@ static void onlinestation_close(struct usb_serial_port *port)
     if (!sp)
         return;
 
+    cancel_delayed_work_sync(&sp->init_work);
     usb_kill_urb(sp->read_urb);
     usb_kill_urb(sp->write_urb);
     usb_kill_urb(sp->int_urb);
 
     sp->mcr = 0;
-    onlinestation_vendor_cmd(port, ONLINESTATION_REQ_SET_LINE_STATE, sp->mcr);
+    onlinestation_vendor_cmd(port, ONLINESTATION_SET_LINE_STATE, sp->mcr);
 }
 
 static int onlinestation_port_probe(struct usb_serial_port *port)
@@ -314,6 +374,8 @@ static int onlinestation_port_probe(struct usb_serial_port *port)
 
     spin_lock_init(&sp->lock);
 
+    INIT_DELAYED_WORK(&sp->init_work, onlinestation_init_work);
+
     usb_set_serial_port_data(port, sp);
 
     return 0;
@@ -336,6 +398,7 @@ static void onlinestation_port_remove(struct usb_serial_port *port)
     if (!sp)
         return;
 
+    cancel_delayed_work_sync(&sp->init_work);
     usb_kill_urb(sp->read_urb);
     usb_kill_urb(sp->write_urb);
     usb_kill_urb(sp->int_urb);
@@ -346,6 +409,7 @@ static void onlinestation_port_remove(struct usb_serial_port *port)
     kfree(sp->read_buf);
     kfree(sp->write_buf);
     kfree(sp->int_buf);
+
     usb_set_serial_port_data(port, NULL);
     kfree(sp);
 }
@@ -364,7 +428,7 @@ static void onlinestation_set_termios(struct tty_struct *tty,
     if (!baud)
         baud = 115200;
 
-    onlinestation_vendor_cmd(port, ONLINESTATION_REQ_SET_BAUD, onlinestation_baud_index(baud));
+    onlinestation_vendor_cmd(port, ONLINESTATION_SET_BAUD, onlinestation_baud_index(baud));
 
     // switch (tty->termios.c_cflag & CSIZE) {
     //     case CS5: lcr |= UART_LCR_WLEN5; break;
@@ -383,15 +447,15 @@ static void onlinestation_set_termios(struct tty_struct *tty,
     //         lcr |= UART_LCR_EPAR;
     // }
 
-    // onlinestation_vendor_cmd(port, ONLINESTATION_REQ_SET_DATA_BITS, lcr);
+    // onlinestation_vendor_cmd(port, ONLINESTATION_SET_DATA_BITS, lcr);
 
     if (tty->termios.c_cflag & CBAUD)
-        sp->mcr |= UART_MCR_DTR;
+        sp->mcr |= ONLINESTATION_EP0_DTR;
 
     if (tty->termios.c_cflag & CRTSCTS)
-        sp->mcr |= UART_MCR_RTS;
+        sp->mcr |= ONLINESTATION_EP0_RTS;
 
-    onlinestation_vendor_cmd(port, ONLINESTATION_REQ_SET_LINE_STATE, sp->mcr);
+    onlinestation_vendor_cmd(port, ONLINESTATION_SET_LINE_STATE, sp->mcr);
 }
 
 static int onlinestation_tiocmset(struct tty_struct *tty,
@@ -408,18 +472,18 @@ static int onlinestation_tiocmset(struct tty_struct *tty,
     spin_lock_irqsave(&sp->lock, flags);
 
     if (set & TIOCM_RTS)
-        sp->mcr |= UART_MCR_RTS;
+        sp->mcr |= ONLINESTATION_EP0_RTS;
     if (set & TIOCM_DTR)
-        sp->mcr |= UART_MCR_DTR;
+        sp->mcr |= ONLINESTATION_EP0_DTR;
 
     if (clear & TIOCM_RTS)
-        sp->mcr &= ~UART_MCR_RTS;
+        sp->mcr &= ~ONLINESTATION_EP0_RTS;
     if (clear & TIOCM_DTR)
-        sp->mcr &= ~UART_MCR_DTR;
+        sp->mcr &= ~ONLINESTATION_EP0_DTR;
 
     spin_unlock_irqrestore(&sp->lock, flags);
 
-    return onlinestation_vendor_cmd(port, ONLINESTATION_REQ_SET_LINE_STATE, sp->mcr);
+    return onlinestation_vendor_cmd(port, ONLINESTATION_SET_LINE_STATE, sp->mcr);
 }
 
 static int onlinestation_tiocmget(struct tty_struct *tty)
@@ -432,19 +496,19 @@ static int onlinestation_tiocmget(struct tty_struct *tty)
         return -ENODEV;
 
     // out
-    if (sp->mcr & UART_MCR_RTS)
+    if (sp->mcr & ONLINESTATION_EP0_RTS)
         result |= TIOCM_RTS;
-    if (sp->mcr & UART_MCR_DTR)
+    if (sp->mcr & ONLINESTATION_EP0_DTR)
         result |= TIOCM_DTR;
 
     // in
-    if (sp->msr & 0x01)
+    if (sp->msr & ONLINESTATION_IN1_CTS)
         result |= TIOCM_CTS;
-    if (sp->msr & 0x02)
+    if (sp->msr & ONLINESTATION_IN1_DSR)
         result |= TIOCM_DSR;
-    if (sp->msr & 0x04)
+    if (sp->msr & ONLINESTATION_IN1_RI)
         result |= TIOCM_RI;
-    if (sp->msr & 0x08) // UART_MSR_DCD
+    if (sp->msr & ONLINESTATION_IN1_DCD)
         result |= TIOCM_CD;
 
     return result;
