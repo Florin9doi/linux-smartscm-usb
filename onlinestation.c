@@ -54,7 +54,6 @@ struct onlinestation_port {
 
     u8 mcr;
     u8 msr;
-    u16 last_intr;
 
     struct delayed_work init_work;
 };
@@ -161,25 +160,7 @@ static void onlinestation_int_callback(struct urb *urb)
         goto resubmit;
     }
 
-    if (urb->actual_length >= 2) {
-        u16 intr = (sp->int_buf[0] << 8) | sp->int_buf[1];
-
-        if (sp->last_intr != intr)
-            dev_info(&port->dev, "OS: int_callback 0x%02x/0x%02x : %s %s / %s %s %s %s\n",
-                sp->int_buf[0], sp->int_buf[1],
-                sp->int_buf[0] & 0x01 ? "out" : "   ",
-                sp->int_buf[0] & 0x04 ? "avl" : "   ",
-                sp->int_buf[1] & ONLINESTATION_IN1_DCD ? "DCD" : "   ",
-                sp->int_buf[1] & ONLINESTATION_IN1_RI  ? "RI " : "   ",
-                sp->int_buf[1] & ONLINESTATION_IN1_DSR ? "DSR" : "   ",
-                sp->int_buf[1] & ONLINESTATION_IN1_CTS ? "CTS" : "   "
-            );
-
-        sp->last_intr = intr;
-    }
-
     if (urb->actual_length >= 1 && (sp->int_buf[0] & 0x01)) {
-
         usb_fill_bulk_urb(sp->read_urb, udev,
                   usb_rcvbulkpipe(udev, ONLINESTATION_EP_DATA_IN),
                   sp->read_buf, ONLINESTATION_BUF_SIZE,
