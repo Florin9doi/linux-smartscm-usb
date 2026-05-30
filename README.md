@@ -1,3 +1,6 @@
+## Summary
+Linux drivers for several devices created solely for the purpose of researching and documenting the original hardware.
+
 ## Compatibility
 ### Conexant SmartSCM-USB modems
 - I-O Data P2GATE DFML-560/P2
